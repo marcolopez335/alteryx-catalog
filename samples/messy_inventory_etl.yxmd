@@ -1,0 +1,312 @@
+<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Properties>
+    <MetaInfo>
+      <Name>Messy Inventory ETL</Name>
+      <Description></Description>
+      <Author></Author>
+      <CreationDate>2024-03-15</CreationDate>
+      <LastSavedDate>2025-11-20</LastSavedDate>
+    </MetaInfo>
+    <RuntimeProperties>
+      <ModuleType>Standard</ModuleType>
+    </RuntimeProperties>
+  </Properties>
+  <Nodes>
+    <!-- Input 1: Main inventory from DB -->
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="100" y="100" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File RecordLimit="" FileFormat="19">
+            <ConnectionString>odbc:DSN=InventoryDB;Trusted_Connection=Yes</ConnectionString>
+            <Table>SELECT sku_id, product_name, warehouse_id, qty_on_hand, qty_reserved, last_count_date, category_code, vendor_id FROM dbo.inventory_current WHERE last_count_date >= '2025-01-01'</Table>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Input: Current Inventory</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileInput" />
+    </Node>
+
+    <!-- Input 2: Warehouse reference -->
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="100" y="250" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File RecordLimit="" FileFormat="0">
+            <ConnectionString>\\fileserver\reference\warehouse_locations.xlsx</ConnectionString>
+            <Table>Warehouses$</Table>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Input: Warehouse Lookup</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileInput" />
+    </Node>
+
+    <!-- Input 3: Vendor master (DEAD END - not connected to output) -->
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="100" y="400" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File RecordLimit="" FileFormat="0">
+            <ConnectionString>\\fileserver\reference\vendor_master.csv</ConnectionString>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Input: Vendor Master</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileInput" />
+    </Node>
+
+    <!-- Formula: temp calculations -->
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula">
+        <Position x="250" y="100" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <FormulaFields>
+            <FormulaField expression="[qty_on_hand] - [qty_reserved]" field="available_qty" fieldType="Int64" />
+            <FormulaField expression="[qty_on_hand] * 0.15" field="temp_safety_stock" fieldType="Double" />
+            <FormulaField expression="IF [available_qty] &lt; 0 THEN 'Negative' ELSEIF [available_qty] = 0 THEN 'Out of Stock' ELSEIF [available_qty] &lt; [temp_safety_stock] THEN 'Low' ELSE 'OK' ENDIF" field="stock_status" fieldType="V_String" size="20" />
+            <FormulaField expression="DateTimeNow()" field="temp_run_timestamp" fieldType="DateTime" />
+            <FormulaField expression="'test_value'" field="test_field" fieldType="V_String" size="50" />
+          </FormulaFields>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Calculate Stock Metrics</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxFormula" />
+    </Node>
+
+    <!-- Filter: active inventory only -->
+    <Node ToolID="5">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Filter.Filter">
+        <Position x="400" y="100" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <Expression>[stock_status] != "Negative"</Expression>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Remove Negative Stock</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxFilter" />
+    </Node>
+
+    <!-- Join: warehouse lookup -->
+    <Node ToolID="6">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join">
+        <Position x="550" y="175" />
+      </GuiSettings>
+      <Properties>
+        <Configuration joinByRecordPos="False">
+          <JoinInfo connection="Left">
+            <Field field="warehouse_id" />
+          </JoinInfo>
+          <JoinInfo connection="Right">
+            <Field field="warehouse_id" />
+          </JoinInfo>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Join Warehouse Details</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxJoin" />
+    </Node>
+
+    <!-- Dead end: vendor join that goes nowhere -->
+    <Node ToolID="7">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join">
+        <Position x="250" y="400" />
+      </GuiSettings>
+      <Properties>
+        <Configuration joinByRecordPos="False">
+          <JoinInfo connection="Left">
+            <Field field="vendor_id" />
+          </JoinInfo>
+          <JoinInfo connection="Right">
+            <Field field="vendor_id" />
+          </JoinInfo>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Join Vendor Info (unused)</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxJoin" />
+    </Node>
+
+    <!-- Dead end: Browse tool on vendor data -->
+    <Node ToolID="8">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.BrowseV2.BrowseV2">
+        <Position x="400" y="400" />
+      </GuiSettings>
+      <Properties>
+        <Configuration />
+        <Annotation DisplayMode="0">
+          <Name>Browse Vendor Data</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxBrowseV2" />
+    </Node>
+
+    <!-- Summarize by warehouse -->
+    <Node ToolID="9">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Summarize.Summarize">
+        <Position x="700" y="175" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <SummarizeFields>
+            <SummarizeField field="warehouse_id" action="GroupBy" rename="warehouse_id" />
+            <SummarizeField field="available_qty" action="Sum" rename="total_available" />
+            <SummarizeField field="qty_on_hand" action="Sum" rename="total_on_hand" />
+            <SummarizeField field="sku_id" action="Count" rename="sku_count" />
+            <SummarizeField field="available_qty" action="Min" rename="min_available" />
+            <SummarizeField field="available_qty" action="Max" rename="max_available" />
+          </SummarizeFields>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Summarize by Warehouse</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxSummarize" />
+    </Node>
+
+    <!-- Sort before output -->
+    <Node ToolID="10">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Sort.Sort">
+        <Position x="850" y="175" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <SortInfo field="total_available" order="Descending" />
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Sort by Available</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxSort" />
+    </Node>
+
+    <!-- Output 1: Summary to DB -->
+    <Node ToolID="11">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="1000" y="100" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File FileFormat="19">
+            <ConnectionString>odbc:DSN=ReportingDB;Trusted_Connection=Yes</ConnectionString>
+            <Table>dbo.inventory_summary</Table>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Output: Inventory Summary DB</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileOutput" />
+    </Node>
+
+    <!-- Output 2: Detail to CSV -->
+    <Node ToolID="12">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="700" y="50" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File FileFormat="2">\\sharepoint\ops\inventory\daily_inventory_detail.csv</File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Output: Detail CSV</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileOutput" />
+    </Node>
+
+    <!-- Dead end: formula on vendor data -->
+    <Node ToolID="13">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula">
+        <Position x="400" y="450" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <FormulaFields>
+            <FormulaField expression="[vendor_name] + ' (' + [vendor_code] + ')'" field="vendor_display" fieldType="V_String" size="100" />
+          </FormulaFields>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Format Vendor Display</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxFormula" />
+    </Node>
+  </Nodes>
+  <Connections>
+    <!-- Main path: Input -> Formula -> Filter -> Join -> Output detail -->
+    <Connection>
+      <Origin ToolID="1" Connection="Output" />
+      <Destination ToolID="4" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="4" Connection="Output" />
+      <Destination ToolID="5" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="5" Connection="True" />
+      <Destination ToolID="6" Connection="Left" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="2" Connection="Output" />
+      <Destination ToolID="6" Connection="Right" />
+    </Connection>
+    <!-- Detail output -->
+    <Connection>
+      <Origin ToolID="6" Connection="Join" />
+      <Destination ToolID="12" Connection="Input" />
+    </Connection>
+    <!-- Summary path: Join -> Summarize -> Sort -> Output DB -->
+    <Connection>
+      <Origin ToolID="6" Connection="Join" />
+      <Destination ToolID="9" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="9" Connection="Output" />
+      <Destination ToolID="10" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="10" Connection="Output" />
+      <Destination ToolID="11" Connection="Input" />
+    </Connection>
+    <!-- Dead end branch: vendor stuff -->
+    <Connection>
+      <Origin ToolID="1" Connection="Output" />
+      <Destination ToolID="7" Connection="Left" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="3" Connection="Output" />
+      <Destination ToolID="7" Connection="Right" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="7" Connection="Join" />
+      <Destination ToolID="8" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="7" Connection="Join" />
+      <Destination ToolID="13" Connection="Input" />
+    </Connection>
+  </Connections>
+</AlteryxDocument>
