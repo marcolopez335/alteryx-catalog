@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 .env
 catalog_output.csv
+catalog_output.xlsx

@@ -2,14 +2,13 @@
 Alteryx Workflow Catalog Builder
 
 Scans a directory of .yxmd/.yxwz/.yxmc files, parses the XML,
-and builds a catalog of all workflows with their metadata,
-inputs, outputs, tools used, and an auto-generated description.
+and builds a catalog with metadata, data lineage, and an auto-generated
+plain-English description of what each workflow does.
 """
 
 import argparse
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from collections import defaultdict
 
 # Tool plugin names -> friendly category names
 TOOL_CATEGORIES = {
@@ -61,31 +60,37 @@ def _friendly_source(raw: str) -> str:
     """Turn a raw connection string / path into a short readable label."""
     if not raw:
         return "unknown"
-    # Extract DSN name from ODBC string
     if "DSN=" in raw:
         for part in raw.split(";"):
             if part.strip().startswith("DSN="):
                 return part.strip().split("=", 1)[1]
-    # File paths — just take the filename
     if "\\" in raw or "/" in raw:
         return raw.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
     return raw
 
 
 def _extract_connection_info(file_elem) -> str:
-    """Pull connection string, file path, or table name from a File element."""
+    """Pull connection string, file path, or table name from a File element.
+    Shows full SQL — no truncation.
+    """
     parts = []
     conn = file_elem.findtext("ConnectionString", "").strip()
     if conn:
         parts.append(conn)
     table = file_elem.findtext("Table", "").strip()
     if table:
-        if len(table) > 120:
-            table = table[:120] + "..."
         parts.append(table)
     if file_elem.text and file_elem.text.strip():
         parts.append(file_elem.text.strip())
     return " | ".join(parts) if parts else "unknown"
+
+
+def _extract_sql(file_elem) -> str:
+    """Extract just the SQL query from a File element, if present."""
+    table = file_elem.findtext("Table", "").strip()
+    if table and any(kw in table.upper() for kw in ("SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "EXEC")):
+        return table
+    return ""
 
 
 def parse_workflow(filepath: Path) -> dict:
@@ -111,8 +116,8 @@ def parse_workflow(filepath: Path) -> dict:
         "joins": [],
         "summarizes": [],
         "sorts": [],
-        "node_details": {},   # tool_id -> {plugin, tool_name, annotation, ...}
-        "connections": [],     # [{from_id, to_id}, ...]
+        "node_details": {},
+        "connections": [],
     }
 
     # -- Metadata --
@@ -140,8 +145,6 @@ def parse_workflow(filepath: Path) -> dict:
             info["connections"].append({
                 "from_id": origin.get("ToolID"),
                 "to_id": dest.get("ToolID"),
-                "from_conn": origin.get("Connection", ""),
-                "to_conn": dest.get("Connection", ""),
             })
 
     # -- Nodes (tools) --
@@ -168,21 +171,19 @@ def parse_workflow(filepath: Path) -> dict:
         if not annotation:
             annotation = props.findtext(".//Annotation/DefaultAnnotationText", "").strip()
 
-        # Store node detail for graph walk
         info["node_details"][tool_id] = {
-            "plugin": plugin,
-            "tool_name": tool_name,
-            "annotation": annotation,
+            "plugin": plugin, "tool_name": tool_name, "annotation": annotation,
         }
 
         # -- Inputs --
         if "DbFileInput" in plugin or "TextInput" in plugin:
-            input_info = {"tool_id": tool_id, "tool": tool_name, "annotation": annotation, "source": ""}
+            input_info = {"tool_id": tool_id, "tool": tool_name, "annotation": annotation, "source": "", "sql": ""}
             if config is not None:
                 file_elem = config.find("File")
                 if file_elem is not None:
                     input_info["source"] = _extract_connection_info(file_elem)
                     input_info["source_short"] = _friendly_source(input_info["source"])
+                    input_info["sql"] = _extract_sql(file_elem)
             info["inputs"].append(input_info)
 
         # -- Outputs --
@@ -193,7 +194,6 @@ def parse_workflow(filepath: Path) -> dict:
                 if file_elem is not None:
                     output_info["destination"] = _extract_connection_info(file_elem)
                     output_info["dest_short"] = _friendly_source(output_info["destination"])
-                    # Detect output type
                     fmt = file_elem.get("FileFormat", "")
                     if "odbc" in output_info["destination"].lower() or fmt == "19":
                         output_info["type"] = "database"
@@ -221,7 +221,7 @@ def parse_workflow(filepath: Path) -> dict:
             if join_fields:
                 info["joins"].append({
                     "tool_id": tool_id,
-                    "fields": list(dict.fromkeys(join_fields)),  # dedupe, keep order
+                    "fields": list(dict.fromkeys(join_fields)),
                     "annotation": annotation,
                 })
 
@@ -254,103 +254,111 @@ def parse_workflow(filepath: Path) -> dict:
 
 
 def auto_describe(wf: dict) -> str:
-    """Generate a plain-English description of what the workflow does."""
-    sentences = []
+    """Generate a natural paragraph describing what the workflow does."""
+    name = wf["name"]
 
-    # 1. What data it pulls in
-    if wf["inputs"]:
-        if len(wf["inputs"]) == 1:
-            inp = wf["inputs"][0]
-            label = inp.get("annotation") or inp.get("source_short", "a data source")
-            sentences.append(f"Pulls data from {label}.")
-        else:
-            labels = []
-            for inp in wf["inputs"]:
-                labels.append(inp.get("annotation") or inp.get("source_short", "a source"))
-            sentences.append(f"Pulls data from {len(labels)} sources: {', '.join(labels)}.")
+    # --- Inputs ---
+    input_labels = []
+    for inp in wf["inputs"]:
+        label = inp.get("annotation") or inp.get("source_short", "a data source")
+        input_labels.append(label)
 
-    # 2. Filtering
+    # --- Build the opening sentence ---
+    if len(input_labels) == 1:
+        opening = f"This workflow pulls data from {input_labels[0]}"
+    elif len(input_labels) == 2:
+        opening = f"This workflow pulls data from {input_labels[0]} and {input_labels[1]}"
+    elif input_labels:
+        opening = f"This workflow pulls data from {', '.join(input_labels[:-1])}, and {input_labels[-1]}"
+    else:
+        opening = "This workflow processes data"
+
+    # --- Transformation narrative ---
+    transform_parts = []
+
     if wf["filters"]:
         for flt in wf["filters"]:
-            expr = flt["expression"]
             if flt["annotation"]:
-                sentences.append(f"Filters rows where {flt['annotation'].lower()} ({expr}).")
+                transform_parts.append(f"filters to {flt['annotation'].lower()}")
             else:
-                sentences.append(f"Filters rows where {expr}.")
+                transform_parts.append(f"filters where {flt['expression']}")
 
-    # 3. Joins
     if wf["joins"]:
         for j in wf["joins"]:
             fields = ", ".join(j["fields"])
             if j["annotation"]:
-                sentences.append(f"Joins data on [{fields}] ({j['annotation'].lower()}).")
+                transform_parts.append(j["annotation"].lower())
             else:
-                sentences.append(f"Joins data on [{fields}].")
+                transform_parts.append(f"joins on {fields}")
 
-    # 4. Formulas / computed columns
     if wf["formulas"]:
-        new_fields = [f["field"] for f in wf["formulas"] if f["field"]]
-        if len(new_fields) <= 3:
-            sentences.append(f"Computes new fields: {', '.join(new_fields)}.")
+        fields = [f["field"] for f in wf["formulas"] if f["field"]]
+        if len(fields) <= 3:
+            transform_parts.append(f"calculates {', '.join(fields)}")
         else:
-            sentences.append(f"Computes {len(new_fields)} new fields including {', '.join(new_fields[:3])}.")
+            transform_parts.append(f"calculates {len(fields)} fields including {', '.join(fields[:3])}")
 
-    # 5. Aggregations
     if wf["summarizes"]:
         agg_parts = []
         for s in wf["summarizes"]:
-            name = s["rename"] or s["field"]
-            agg_parts.append(f"{s['action']}({s['field']}) as {name}")
+            name_str = s["rename"] or s["field"]
+            agg_parts.append(f"{s['action'].lower()} of {s['field']}")
         if len(agg_parts) <= 3:
-            sentences.append(f"Aggregates: {', '.join(agg_parts)}.")
+            transform_parts.append(f"aggregates the {', '.join(agg_parts)}")
         else:
-            sentences.append(f"Aggregates {len(agg_parts)} measures including {', '.join(agg_parts[:3])}.")
+            transform_parts.append(f"aggregates {len(agg_parts)} measures")
 
-    # 6. Other notable tools
-    other = []
+    # Other notable tools
     for t in wf["tools"]:
-        if t in ("Data Cleansing",):
-            other.append("cleanses data")
-        elif t in ("Cross Tab",):
-            other.append("pivots data (cross tab)")
-        elif t in ("Transpose",):
-            other.append("transposes rows/columns")
-        elif t in ("Union",):
-            other.append("unions multiple streams")
-        elif t in ("Unique",):
-            other.append("deduplicates rows")
-        elif t in ("RegEx",):
-            other.append("applies regex transformations")
-        elif t in ("Download (API)",):
-            other.append("calls an external API")
-        elif t in ("Email",):
-            other.append("sends an email notification")
-        elif t in ("Run Command",):
-            other.append("runs an external command")
-        elif t in ("Macro",):
-            other.append("calls a macro (sub-workflow)")
-    if other:
-        sentences.append("Also " + ", ".join(other) + ".")
+        if t == "Data Cleansing":
+            transform_parts.append("cleanses the data")
+        elif t == "Cross Tab":
+            transform_parts.append("pivots the data")
+        elif t == "Transpose":
+            transform_parts.append("transposes rows and columns")
+        elif t == "Union":
+            transform_parts.append("unions multiple data streams")
+        elif t == "Unique":
+            transform_parts.append("removes duplicate rows")
+        elif t == "RegEx":
+            transform_parts.append("applies regex transformations")
+        elif t == "Download (API)":
+            transform_parts.append("calls an external API")
+        elif t == "Macro":
+            transform_parts.append("calls a macro sub-workflow")
 
-    # 7. Where it writes
-    if wf["outputs"]:
-        if len(wf["outputs"]) == 1:
-            out = wf["outputs"][0]
-            dest = out.get("annotation") or out.get("dest_short", "a destination")
-            out_type = out.get("type", "file")
-            sentences.append(f"Writes results to {dest} ({out_type}).")
-        else:
-            parts = []
-            for out in wf["outputs"]:
-                dest = out.get("annotation") or out.get("dest_short", "a destination")
-                out_type = out.get("type", "file")
-                parts.append(f"{dest} ({out_type})")
-            sentences.append(f"Writes results to {len(parts)} destinations: {', '.join(parts)}.")
+    # --- Output sentence ---
+    output_parts = []
+    for out in wf["outputs"]:
+        dest = out.get("annotation") or out.get("dest_short", "a destination")
+        out_type = out.get("type", "file")
+        output_parts.append(f"{dest} ({out_type})")
 
-    if not sentences:
-        return "Could not determine workflow purpose from XML."
+    # --- Assemble the paragraph ---
+    if transform_parts:
+        middle = ", ".join(transform_parts)
+        paragraph = f"{opening}, {middle}"
+    else:
+        paragraph = opening
 
-    return " ".join(sentences)
+    if len(output_parts) == 1:
+        paragraph += f", and writes the results to {output_parts[0]}."
+    elif len(output_parts) == 2:
+        paragraph += f", and writes the results to {output_parts[0]} and {output_parts[1]}."
+    elif output_parts:
+        paragraph += f", and writes the results to {', '.join(output_parts[:-1])}, and {output_parts[-1]}."
+    else:
+        paragraph += "."
+
+    # Email notification
+    if "Email" in wf["tools"]:
+        paragraph += " It also sends an email notification."
+
+    # Run command
+    if "Run Command" in wf["tools"]:
+        paragraph += " It also runs an external system command."
+
+    return paragraph
 
 
 def build_summary(wf: dict) -> str:
@@ -386,17 +394,18 @@ def print_catalog(workflows: list[dict]) -> None:
     console.print()
 
     for wf in workflows:
-        # Header panel
         title_parts = [f"[bold white]{wf['name']}[/]"]
         if wf["author"]:
             title_parts.append(f"[dim]by {wf['author']}[/]")
         console.print(Panel("  ".join(title_parts), border_style="cyan", padding=(0, 2)))
 
-        # Auto-description (always shown, replaces missing description)
-        if wf["description"]:
-            console.print(f"  [bold]Description:[/]  {wf['description']}")
-        console.print(f"  [bold]Auto Summary:[/] {auto_describe(wf)}")
+        # Auto description — always shown
+        console.print(f"  [bold]What it does:[/]")
+        console.print(f"    {auto_describe(wf)}")
+        console.print()
 
+        if wf["description"]:
+            console.print(f"  [bold]Author Note:[/]  {wf['description']}")
         if wf["annotation"]:
             console.print(f"  [bold]Department:[/]   {wf['annotation']}")
         console.print(f"  [bold]File:[/]         [dim]{wf['filename']}[/]")
@@ -412,17 +421,25 @@ def print_catalog(workflows: list[dict]) -> None:
             t = Table(title="[bold green]Inputs[/]", box=box.SIMPLE, border_style="dim", show_lines=False)
             t.add_column("#", style="dim", width=3)
             t.add_column("Label", style="white", min_width=25)
-            t.add_column("Source", style="cyan")
+            t.add_column("Source", style="cyan", no_wrap=False)
             for i, inp in enumerate(wf["inputs"], 1):
                 t.add_row(str(i), inp["annotation"] or "-", inp["source"] or "-")
             console.print(t)
+
+            # Show full SQL if any input has it
+            for inp in wf["inputs"]:
+                if inp.get("sql"):
+                    label = inp["annotation"] or inp.get("source_short", "Input")
+                    console.print(f"  [bold]SQL ({label}):[/]")
+                    console.print(f"    [dim]{inp['sql']}[/]")
+                    console.print()
 
         # Outputs table
         if wf["outputs"]:
             t = Table(title="[bold red]Outputs[/]", box=box.SIMPLE, border_style="dim", show_lines=False)
             t.add_column("#", style="dim", width=3)
             t.add_column("Label", style="white", min_width=25)
-            t.add_column("Destination", style="yellow")
+            t.add_column("Destination", style="yellow", no_wrap=False)
             t.add_column("Type", style="dim")
             for i, out in enumerate(wf["outputs"], 1):
                 t.add_row(str(i), out["annotation"] or "-", out["destination"] or "-", out.get("type", "-"))
@@ -465,12 +482,155 @@ def print_catalog(workflows: list[dict]) -> None:
                 t.add_row(s["field"], s["action"], s["rename"] or s["field"])
             console.print(t)
 
-        # Flow summary
-        console.print()
-        console.print(f"  [bold]Flow:[/] {build_summary(wf)}")
         console.print()
         console.rule(style="dim")
         console.print()
+
+
+def export_excel(workflows: list[dict], output_path: Path) -> None:
+    """Export catalog to a formatted Excel workbook."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+
+    wb = Workbook()
+
+    # ===== Sheet 1: Catalog Overview =====
+    ws = wb.active
+    ws.title = "Catalog"
+
+    header_font = Font(bold=True, color="FFFFFF", size=11)
+    header_fill = PatternFill(start_color="2F5496", end_color="2F5496", fill_type="solid")
+    wrap = Alignment(wrap_text=True, vertical="top")
+    thin_border = Border(
+        bottom=Side(style="thin", color="D9E2F3"),
+    )
+
+    headers = [
+        "Workflow Name", "Author", "Department", "What It Does",
+        "File", "Created", "Last Saved", "Tool Count", "Tools Used",
+    ]
+    for col, header in enumerate(headers, 1):
+        cell = ws.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    for row_idx, wf in enumerate(workflows, 2):
+        values = [
+            wf["name"],
+            wf["author"],
+            wf["annotation"],
+            auto_describe(wf),
+            wf["filename"],
+            wf["created"],
+            wf["last_saved"],
+            wf["tool_count"],
+            ", ".join(wf["tools"]),
+        ]
+        for col, val in enumerate(values, 1):
+            cell = ws.cell(row=row_idx, column=col, value=val)
+            cell.alignment = wrap
+            cell.border = thin_border
+
+    # Column widths
+    widths = [30, 15, 25, 80, 30, 12, 12, 10, 35]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[ws.cell(row=1, column=i).column_letter].width = w
+
+    # Freeze header row
+    ws.freeze_panes = "A2"
+
+    # ===== Sheet 2: Inputs & Outputs =====
+    ws2 = wb.create_sheet("Inputs & Outputs")
+    headers2 = ["Workflow", "Direction", "Label", "Source / Destination", "Type", "SQL Query"]
+    for col, header in enumerate(headers2, 1):
+        cell = ws2.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    row_idx = 2
+    for wf in workflows:
+        for inp in wf["inputs"]:
+            values = [
+                wf["name"], "Input",
+                inp["annotation"] or "-",
+                inp["source"],
+                "-",
+                inp.get("sql", ""),
+            ]
+            for col, val in enumerate(values, 1):
+                cell = ws2.cell(row=row_idx, column=col, value=val)
+                cell.alignment = wrap
+                cell.border = thin_border
+            row_idx += 1
+
+        for out in wf["outputs"]:
+            values = [
+                wf["name"], "Output",
+                out["annotation"] or "-",
+                out["destination"],
+                out.get("type", "-"),
+                "",
+            ]
+            for col, val in enumerate(values, 1):
+                cell = ws2.cell(row=row_idx, column=col, value=val)
+                cell.alignment = wrap
+                cell.border = thin_border
+            row_idx += 1
+
+    widths2 = [30, 10, 30, 60, 12, 80]
+    for i, w in enumerate(widths2, 1):
+        ws2.column_dimensions[ws2.cell(row=1, column=i).column_letter].width = w
+    ws2.freeze_panes = "A2"
+
+    # ===== Sheet 3: Transformations =====
+    ws3 = wb.create_sheet("Transformations")
+    headers3 = ["Workflow", "Type", "Label / Field", "Detail"]
+    for col, header in enumerate(headers3, 1):
+        cell = ws3.cell(row=1, column=col, value=header)
+        cell.font = header_font
+        cell.fill = header_fill
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    row_idx = 2
+    for wf in workflows:
+        for flt in wf["filters"]:
+            for col, val in enumerate([wf["name"], "Filter", flt["annotation"] or "-", flt["expression"]], 1):
+                cell = ws3.cell(row=row_idx, column=col, value=val)
+                cell.alignment = wrap
+                cell.border = thin_border
+            row_idx += 1
+
+        for j in wf["joins"]:
+            for col, val in enumerate([wf["name"], "Join", j["annotation"] or "-", ", ".join(j["fields"])], 1):
+                cell = ws3.cell(row=row_idx, column=col, value=val)
+                cell.alignment = wrap
+                cell.border = thin_border
+            row_idx += 1
+
+        for f in wf["formulas"]:
+            for col, val in enumerate([wf["name"], "Formula", f["field"], f["expression"]], 1):
+                cell = ws3.cell(row=row_idx, column=col, value=val)
+                cell.alignment = wrap
+                cell.border = thin_border
+            row_idx += 1
+
+        for s in wf["summarizes"]:
+            detail = f"{s['action']}({s['field']})" + (f" as {s['rename']}" if s["rename"] else "")
+            for col, val in enumerate([wf["name"], "Aggregation", s["rename"] or s["field"], detail], 1):
+                cell = ws3.cell(row=row_idx, column=col, value=val)
+                cell.alignment = wrap
+                cell.border = thin_border
+            row_idx += 1
+
+    widths3 = [30, 12, 25, 60]
+    for i, w in enumerate(widths3, 1):
+        ws3.column_dimensions[ws3.cell(row=1, column=i).column_letter].width = w
+    ws3.freeze_panes = "A2"
+
+    wb.save(output_path)
+    print(f"Exported catalog to {output_path}")
 
 
 def export_csv(workflows: list[dict], output_path: Path) -> None:
@@ -481,10 +641,10 @@ def export_csv(workflows: list[dict], output_path: Path) -> None:
         writer = csv.writer(f)
         writer.writerow([
             "Workflow Name", "File", "Author", "Department",
-            "Description", "Auto Description",
+            "Description", "What It Does",
             "Created", "Last Saved", "Tool Count", "Tools Used",
             "Inputs", "Outputs", "Filters", "Joins", "Formulas",
-            "Aggregations", "Flow",
+            "Aggregations",
         ])
         for wf in workflows:
             inputs_str = "; ".join(
@@ -509,7 +669,7 @@ def export_csv(workflows: list[dict], output_path: Path) -> None:
                 wf["created"], wf["last_saved"],
                 wf["tool_count"], ", ".join(wf["tools"]),
                 inputs_str, outputs_str, filters_str, joins_str,
-                formulas_str, agg_str, build_summary(wf),
+                formulas_str, agg_str,
             ])
 
     print(f"Exported catalog to {output_path}")
@@ -529,6 +689,10 @@ def main():
         "--csv", type=str, default=None,
         help="Export catalog to a CSV file",
     )
+    parser.add_argument(
+        "--excel", type=str, default=None,
+        help="Export catalog to a formatted Excel file (.xlsx)",
+    )
     args = parser.parse_args()
 
     scan_dir = Path(args.path)
@@ -536,7 +700,6 @@ def main():
         print(f"Error: {scan_dir} is not a directory")
         return
 
-    # Find all workflow files
     extensions = ("*.yxmd", "*.yxwz", "*.yxmc")
     files = []
     for ext in extensions:
@@ -551,7 +714,6 @@ def main():
         print(f"No Alteryx workflow files found in {scan_dir}")
         return
 
-    # Parse all workflows
     workflows = []
     for f in files:
         try:
@@ -560,11 +722,13 @@ def main():
         except ET.ParseError as e:
             print(f"  Warning: Failed to parse {f.name}: {e}")
 
-    # Output
     print_catalog(workflows)
 
     if args.csv:
         export_csv(workflows, Path(args.csv))
+
+    if args.excel:
+        export_excel(workflows, Path(args.excel))
 
 
 if __name__ == "__main__":
