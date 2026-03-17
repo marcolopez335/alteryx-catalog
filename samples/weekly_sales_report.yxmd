@@ -1,0 +1,173 @@
+<?xml version="1.0"?>
+<AlteryxDocument yxmdVer="2023.1">
+  <Properties>
+    <MetaInfo>
+      <Name>Weekly Sales Report</Name>
+      <Description>Pulls weekly sales data from SQL Server, joins with product catalog, computes KPIs, and publishes to Tableau Server and a shared drive CSV.</Description>
+      <Author>Jane Smith</Author>
+      <CreationDate>2025-06-15</CreationDate>
+      <LastSavedDate>2026-02-28</LastSavedDate>
+    </MetaInfo>
+    <RuntimeProperties>
+      <ModuleType>Standard</ModuleType>
+    </RuntimeProperties>
+    <Annotation DisplayMode="0">
+      <Name />
+      <DefaultAnnotationText>Weekly Sales Report - Finance Team</DefaultAnnotationText>
+      <Left value="50" />
+      <Top value="50" />
+    </Annotation>
+  </Properties>
+  <Nodes>
+    <Node ToolID="1">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="100" y="100" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <Passwords />
+          <File RecordLimit="" FileFormat="19" SearchSubDirs="False" OutputFileName="">
+            <ConnectionString>odbc:DSN=SalesDB;UID=svc_alteryx;Trusted_Connection=Yes</ConnectionString>
+            <Table>SELECT order_id, product_id, quantity, revenue, order_date FROM dbo.orders WHERE order_date >= DATEADD(day, -7, GETDATE())</Table>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Input: Sales Orders (last 7 days)</Name>
+          <DefaultAnnotationText>Sales Orders from SalesDB</DefaultAnnotationText>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileInput" />
+    </Node>
+    <Node ToolID="2">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileInput.DbFileInput">
+        <Position x="100" y="250" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File RecordLimit="" FileFormat="0" SearchSubDirs="False" OutputFileName="">
+            <ConnectionString>\\fileserver\data\reference\product_catalog.xlsx</ConnectionString>
+            <Table>Sheet1$</Table>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Input: Product Catalog</Name>
+          <DefaultAnnotationText>Product Catalog Excel</DefaultAnnotationText>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileInput" />
+    </Node>
+    <Node ToolID="3">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Join.Join">
+        <Position x="300" y="175" />
+      </GuiSettings>
+      <Properties>
+        <Configuration joinByRecordPos="False">
+          <JoinInfo connection="Left">
+            <Field field="product_id" />
+          </JoinInfo>
+          <JoinInfo connection="Right">
+            <Field field="product_id" />
+          </JoinInfo>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Join on product_id</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxJoin" />
+    </Node>
+    <Node ToolID="4">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Formula.Formula">
+        <Position x="450" y="175" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <FormulaFields>
+            <FormulaField expression="[revenue] / [quantity]" field="avg_price" fieldType="Double" />
+            <FormulaField expression="IF [revenue] > 1000 THEN 'High' ELSE 'Low' ENDIF" field="revenue_tier" fieldType="V_String" size="10" />
+          </FormulaFields>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Calculate KPIs</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxFormula" />
+    </Node>
+    <Node ToolID="5">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="650" y="100" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File FileFormat="2" MaxRecords="">\\sharepoint\finance\reports\weekly_sales.csv</File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Output: Weekly Sales CSV</Name>
+          <DefaultAnnotationText>CSV to shared drive</DefaultAnnotationText>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileOutput" />
+    </Node>
+    <Node ToolID="6">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.DbFileOutput.DbFileOutput">
+        <Position x="650" y="250" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <File FileFormat="19" MaxRecords="">
+            <ConnectionString>odbc:DSN=ReportingDB;Trusted_Connection=Yes</ConnectionString>
+            <Table>dbo.weekly_sales_summary</Table>
+          </File>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Output: Reporting DB</Name>
+          <DefaultAnnotationText>Write to ReportingDB</DefaultAnnotationText>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxDbFileOutput" />
+    </Node>
+    <Node ToolID="7">
+      <GuiSettings Plugin="AlteryxBasePluginsGui.Summarize.Summarize">
+        <Position x="450" y="300" />
+      </GuiSettings>
+      <Properties>
+        <Configuration>
+          <SummarizeFields>
+            <SummarizeField field="revenue" action="Sum" rename="total_revenue" />
+            <SummarizeField field="quantity" action="Sum" rename="total_quantity" />
+            <SummarizeField field="order_id" action="Count" rename="order_count" />
+          </SummarizeFields>
+        </Configuration>
+        <Annotation DisplayMode="0">
+          <Name>Summarize Totals</Name>
+        </Annotation>
+      </Properties>
+      <EngineSettings EngineDll="AlteryxBasePluginsEngine.dll" EngineDllEntryPoint="AlteryxSummarize" />
+    </Node>
+  </Nodes>
+  <Connections>
+    <Connection>
+      <Origin ToolID="1" Connection="Output" />
+      <Destination ToolID="3" Connection="Left" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="2" Connection="Output" />
+      <Destination ToolID="3" Connection="Right" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="3" Connection="Join" />
+      <Destination ToolID="4" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="4" Connection="Output" />
+      <Destination ToolID="5" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="4" Connection="Output" />
+      <Destination ToolID="6" Connection="Input" />
+    </Connection>
+    <Connection>
+      <Origin ToolID="3" Connection="Join" />
+      <Destination ToolID="7" Connection="Input" />
+    </Connection>
+  </Connections>
+</AlteryxDocument>
